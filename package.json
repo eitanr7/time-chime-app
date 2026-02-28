@@ -43,8 +43,9 @@
     ],
     "extraResources": [
       {
-        "from": "resources/*.png",
-        "to": "resources"
+        "from": "resources",
+        "to": "resources",
+        "filter": ["*.png"]
       }
     ],
     "mac": {

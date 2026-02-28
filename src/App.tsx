@@ -1,8 +1,12 @@
 import { useState, useEffect, useRef } from 'react'
-import { Clock, Bell, Settings } from 'lucide-react'
+import ActiveScreen from './components/ActiveScreen.tsx'
+import InactiveScreen from './components/InactiveScreen.tsx'
 
 const CHIME_MINUTE_KEY = 'time-chime-minute'
 const CHIME_ACTIVE_KEY = 'time-chime-active'
+const THEME_PREFERENCE_KEY = 'time-chime-theme-preference'
+
+type ThemePreference = 'system' | 'dark' | 'light'
 
 let audioCtx: AudioContext | null = null
 
@@ -59,7 +63,21 @@ function playChime() {
   }
 }
 
+function isThemePreference(value: string | null): value is ThemePreference {
+  return value === 'system' || value === 'dark' || value === 'light'
+}
+
+function getThemePreference(): ThemePreference {
+  const saved = localStorage.getItem(THEME_PREFERENCE_KEY)
+  return isThemePreference(saved) ? saved : 'system'
+}
+
+function getSystemPrefersDark(): boolean {
+  return window.matchMedia('(prefers-color-scheme: dark)').matches
+}
+
 function App() {
+  // State persisted between launches.
   const [chimeMinute, setChimeMinute] = useState(() => {
     const saved = localStorage.getItem(CHIME_MINUTE_KEY)
     return saved !== null ? parseInt(saved, 10) : 0
@@ -67,19 +85,46 @@ function App() {
   const [active, setActive] = useState(() => {
     return localStorage.getItem(CHIME_ACTIVE_KEY) === 'true'
   })
+
+  // Runtime state.
   const [now, setNow] = useState(() => new Date())
   const [prefers24Hour, setPrefers24Hour] = useState<boolean | null>(null)
+  const [themePreference, setThemePreference] = useState<ThemePreference>(() => getThemePreference())
+  const [systemPrefersDark, setSystemPrefersDark] = useState(() => getSystemPrefersDark())
+
+  // Mutable refs to avoid duplicate side effects.
   const lastChimeHour = useRef<number | null>(null)
   const lastSentNextChime = useRef<string | null>(null)
 
-  useEffect(() => {
-    localStorage.setItem(CHIME_MINUTE_KEY, String(chimeMinute))
-    lastChimeHour.current = null
-  }, [chimeMinute])
+  // Final theme used for styling; follows OS only when preference is "system".
+  const resolvedTheme = themePreference === 'system'
+    ? (systemPrefersDark ? 'dark' : 'light')
+    : themePreference
 
+  // Subscribe once to OS theme changes; used when preference is "system".
   useEffect(() => {
-    localStorage.setItem(CHIME_ACTIVE_KEY, String(active))
-  }, [active])
+    const media = window.matchMedia('(prefers-color-scheme: dark)')
+    const handleChange = (event: MediaQueryListEvent) => {
+      setSystemPrefersDark(event.matches)
+    }
+
+    media.addEventListener('change', handleChange)
+    return () => {
+      media.removeEventListener('change', handleChange)
+    }
+  }, [])
+
+  // Keep renderer styling in sync with the resolved theme.
+  useEffect(() => {
+    const isDark = resolvedTheme === 'dark'
+    document.documentElement.classList.toggle('dark', isDark)
+    document.documentElement.style.colorScheme = isDark ? 'dark' : 'light'
+  }, [resolvedTheme])
+
+  // Inform the main process which theme source Electron should use.
+  useEffect(() => {
+    void window.electronAPI.setThemeSource(themePreference).catch(() => {})
+  }, [themePreference])
 
   useEffect(() => {
     const id = setInterval(() => {
@@ -99,6 +144,7 @@ function App() {
     return () => clearInterval(id)
   }, [active, chimeMinute])
 
+  // Read platform time-format preference once from the main process.
   useEffect(() => {
     let cancelled = false
 
@@ -120,6 +166,7 @@ function App() {
     }
   }, [])
 
+  // Keep tray "next chime" text in sync; avoid re-sending unchanged values.
   useEffect(() => {
     if (!active) {
       if (lastSentNextChime.current !== null) {
@@ -143,13 +190,30 @@ function App() {
     }
   }, [active, chimeMinute, now, prefers24Hour])
 
-  const handleEnable = () => {
-    playChime()
-    setActive(true)
+  // User-driven updates also persist immediately.
+  const handleChimeMinuteChange = (minute: number) => {
+    setChimeMinute(minute)
+    localStorage.setItem(CHIME_MINUTE_KEY, String(minute))
+    lastChimeHour.current = null
   }
 
+  const handleThemeChange = (theme: ThemePreference) => {
+    setThemePreference(theme)
+    localStorage.setItem(THEME_PREFERENCE_KEY, theme)
+  }
+
+  const handleEnable = () => {
+    setActive(true)
+    localStorage.setItem(CHIME_ACTIVE_KEY, 'true')
+  }
+
+  const handleEdit = () => {
+    setActive(false)
+    localStorage.setItem(CHIME_ACTIVE_KEY, 'false')
+  }
+
+  // UI helpers.
   const minutes = Array.from({ length: 60 }, (_, i) => i)
-  const pad = (n: number) => n.toString().padStart(2, '0')
 
   // Next 12 chime times from now
   const nextChimeTimes = (() => {
@@ -166,104 +230,29 @@ function App() {
     return result
   })()
 
-  // Settings screen
+  // Settings screen when chime is disabled.
   if (!active) {
     return (
-      <div className="min-h-screen w-full flex flex-col items-center justify-center p-8 bg-neutral-950 text-white">
-        <div className="flex items-center gap-2 mb-8 text-amber-400">
-          <Clock className="w-5 h-5" strokeWidth={1.5} />
-          <span className="text-sm font-medium tracking-wider uppercase">Time Chime</span>
-        </div>
-
-        <h2 className="text-xl font-medium text-neutral-300 mb-8">Configure your chime</h2>
-
-        <div className="w-full max-w-sm space-y-6">
-          <div>
-            <label className="block text-sm text-neutral-400 mb-3">
-              Chime at <span className="text-amber-400 font-medium">:{pad(chimeMinute)}</span> every hour
-            </label>
-            <div className="flex flex-wrap gap-1.5 justify-center">
-              {minutes.map((m) => (
-                <button
-                  key={m}
-                  onClick={() => setChimeMinute(m)}
-                  className={`w-8 h-8 rounded-lg text-sm transition-colors ${
-                    m === chimeMinute
-                      ? 'bg-amber-500 text-black font-semibold'
-                      : 'bg-neutral-800/80 text-neutral-400 hover:bg-neutral-700 hover:text-white'
-                  }`}
-                >
-                  {pad(m)}
-                </button>
-              ))}
-            </div>
-          </div>
-
-          <div className="flex justify-center gap-3">
-            <button
-              onClick={() => playChime()}
-              className="flex items-center gap-2 px-4 py-2.5 rounded-xl bg-neutral-700 hover:bg-neutral-600 transition-colors text-neutral-200"
-            >
-              <Bell className="w-5 h-5" />
-              <span className="font-medium">Test chime</span>
-            </button>
-            <button
-              onClick={handleEnable}
-              className="flex items-center gap-2 px-6 py-2.5 rounded-xl bg-amber-500 hover:bg-amber-400 text-black font-semibold transition-colors"
-            >
-              <Bell className="w-5 h-5" />
-              <span>Enable</span>
-            </button>
-          </div>
-
-          <p className="text-center text-xs text-neutral-500">
-            Your preference is saved between sessions
-          </p>
-        </div>
-      </div>
+      <InactiveScreen
+        chimeMinute={chimeMinute}
+        minutes={minutes}
+        themePreference={themePreference}
+        onThemeChange={handleThemeChange}
+        onChimeMinuteChange={handleChimeMinuteChange}
+        onTestChime={playChime}
+        onEnable={handleEnable}
+      />
     )
   }
 
-  // Clock / active screen
+  // Active screen while chimes are running.
   return (
-    <div className="min-h-screen w-full flex flex-col items-center justify-center p-8 bg-neutral-950 text-white">
-      <div className="mb-8">
-        <button
-          onClick={() => setActive(false)}
-          className="flex items-center gap-2 px-3 py-2 rounded-lg text-neutral-400 hover:text-white hover:bg-neutral-800/80 transition-colors"
-        >
-          <Settings className="w-5 h-5" />
-          <span className="text-sm font-medium">Settings</span>
-        </button>
-      </div>
-
-      <div className="flex items-center gap-2 mb-2 text-amber-400">
-        <Clock className="w-5 h-5" strokeWidth={1.5} />
-        <span className="text-sm font-medium tracking-wider uppercase">Time Chime</span>
-      </div>
-
-      <div className="text-6xl sm:text-7xl font-light tabular-nums mb-4">
-        {formatTime(now, true, prefers24Hour)}
-      </div>
-
-      <p className="text-neutral-500 text-sm mb-10">
-        Chimes at :{pad(chimeMinute)} every hour
-      </p>
-
-      <div className="w-full max-w-sm">
-        <p className="text-xs text-neutral-500 uppercase tracking-wider mb-3">Upcoming chimes</p>
-        <div className="flex flex-wrap gap-2 justify-center">
-          {nextChimeTimes.map((time, index) => (
-            <span
-              key={`${time}-${index}`}
-              className="px-3 py-1.5 rounded-lg bg-neutral-800/80 text-neutral-300 text-sm font-mono"
-            >
-              {time}
-            </span>
-          ))}
-        </div>
-      </div>
-    </div>
+    <ActiveScreen
+      currentTime={formatTime(now, true, prefers24Hour)}
+      chimeMinute={chimeMinute}
+      nextChimeTimes={nextChimeTimes}
+      onEdit={handleEdit}
+    />
   )
 }
 

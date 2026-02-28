@@ -1,4 +1,5 @@
 @import "tailwindcss";
+@custom-variant dark (&:where(.dark, .dark *));
 
 @layer base {
   :root {
@@ -11,6 +12,11 @@
 
   body {
     margin: 0;
+    color: rgb(10 10 10 / 0.9);
+    background-color: #fafafa;
+  }
+
+  .dark body {
     color: rgb(255 255 255 / 0.87);
     background-color: #0a0a0a;
   }

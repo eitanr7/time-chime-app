@@ -1,4 +1,4 @@
-import { app, BrowserWindow, Tray, Menu, nativeImage, session, ipcMain } from 'electron'
+import { app, BrowserWindow, Tray, Menu, nativeImage, session, ipcMain, nativeTheme } from 'electron'
 import { execFileSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import path from 'node:path'
@@ -10,11 +10,13 @@ process.env.APP_ROOT = path.join(__dirname, '..')
 const VITE_DEV_SERVER_URL = process.env['VITE_DEV_SERVER_URL']
 const RENDERER_DIST = path.join(process.env.APP_ROOT, 'dist')
 
+// App-level singletons/state.
 let win: BrowserWindow | null = null
 let tray: Tray | null = null
 let isQuitting = false
 let nextChimeText: string | null = null
 
+// Detect whether macOS is using 24-hour time in system settings.
 function getMacPrefers24HourTime(): boolean | null {
   if (process.platform !== 'darwin') return null
 
@@ -48,6 +50,7 @@ function getMacPrefers24HourTime(): boolean | null {
   }
 }
 
+// Window visibility helpers.
 function hideMainWindow() {
   win?.hide()
   app.dock?.hide()
@@ -63,6 +66,7 @@ function showMainWindow() {
   win.focus()
 }
 
+// Tray label helpers.
 function getTrayToolTip(): string {
   return nextChimeText ? `Next chime: ${nextChimeText}` : 'Time Chime Off'
 }
@@ -79,7 +83,7 @@ function buildTrayMenu() {
     },
     { type: 'separator' },
     {
-      label: 'Show',
+      label: 'Open',
       click: () => {
         showMainWindow()
       },
@@ -95,6 +99,7 @@ function buildTrayMenu() {
   ])
 }
 
+// Recompute all tray UI pieces from current app state.
 function refreshTrayUI() {
   if (!tray) return
   tray.setImage(createTrayIcon(Boolean(nextChimeText)))
@@ -105,6 +110,7 @@ function refreshTrayUI() {
   tray.setContextMenu(buildTrayMenu())
 }
 
+// Resolve icons from packaged resources in prod or project files in dev.
 function getResourceBasePath() {
   return app.isPackaged
     ? path.join(process.resourcesPath, 'resources')
@@ -121,7 +127,7 @@ function resolveTrayIconFile(enabled: boolean): string {
     }
   }
 
-  return path.join(resourceBase, 'iconTemplate.png')
+  return path.join(resourceBase, 'IconTemplate.png')
 }
 
 function createTrayIcon(enabled = false): Electron.NativeImage {
@@ -137,6 +143,16 @@ function createTrayIcon(enabled = false): Electron.NativeImage {
   return icon
 }
 
+// Keep BrowserWindow background in sync with OS/Electron theme.
+function getWindowBackgroundColor() {
+  return nativeTheme.shouldUseDarkColors ? '#0a0a0a' : '#fafafa'
+}
+
+function syncWindowAppearance() {
+  win?.setBackgroundColor(getWindowBackgroundColor())
+}
+
+// Main app window lifecycle.
 function createWindow() {
   win = new BrowserWindow({
     width: 480,
@@ -150,7 +166,7 @@ function createWindow() {
     title: 'Time Chime',
     titleBarStyle: 'hiddenInset',
     trafficLightPosition: { x: 12, y: 12 },
-    backgroundColor: '#0a0a0a',
+    backgroundColor: getWindowBackgroundColor(),
     show: false,
   })
 
@@ -189,6 +205,7 @@ app.on('activate', () => {
 })
 
 app.whenReady().then(() => {
+  // Apply a strict CSP for packaged builds.
   if (!VITE_DEV_SERVER_URL) {
     session.defaultSession.webRequest.onHeadersReceived((details, callback) => {
       callback({
@@ -204,8 +221,14 @@ app.whenReady().then(() => {
 
   createWindow()
   createTray()
+
+  // React to runtime theme updates from OS or themeSource changes.
+  nativeTheme.on('updated', () => {
+    syncWindowAppearance()
+  })
 })
 
+// Renderer -> main IPC channels.
 ipcMain.on('tray:set-next-chime', (_event, value: unknown) => {
   nextChimeText = typeof value === 'string' ? value : null
   refreshTrayUI()
@@ -213,6 +236,12 @@ ipcMain.on('tray:set-next-chime', (_event, value: unknown) => {
 
 ipcMain.handle('system:get-prefers-24-hour-time', () => {
   return getMacPrefers24HourTime()
+})
+
+ipcMain.handle('system:set-theme-source', (_event, value: unknown) => {
+  const source = value === 'light' || value === 'dark' || value === 'system' ? value : 'system'
+  nativeTheme.themeSource = source
+  syncWindowAppearance()
 })
 
 app.on('window-all-closed', () => {
