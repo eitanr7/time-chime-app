@@ -2,51 +2,60 @@ import { useState, useEffect, useRef } from 'react'
 import { Clock, Bell, Settings } from 'lucide-react'
 
 const CHIME_MINUTE_KEY = 'time-chime-minute'
+const CHIME_ACTIVE_KEY = 'time-chime-active'
+
+let audioCtx: AudioContext | null = null
+
+function formatTime(date: Date, withSeconds = false, prefers24Hour: boolean | null = null): string {
+  return new Intl.DateTimeFormat(undefined, {
+    hour: 'numeric',
+    minute: '2-digit',
+    ...(prefers24Hour === null ? {} : { hour12: !prefers24Hour }),
+    ...(withSeconds ? { second: '2-digit' } : {}),
+  }).format(date)
+}
+
+function getAudioContext(): AudioContext {
+  if (!audioCtx || audioCtx.state === 'closed') {
+    audioCtx = new AudioContext()
+  }
+  if (audioCtx.state === 'suspended') {
+    audioCtx.resume()
+  }
+  return audioCtx
+}
 
 function playChime() {
-  const audioContext = new (window.AudioContext || (window as typeof window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext)()
-  if (audioContext.state === 'suspended') {
-    audioContext.resume()
-  }
+  const ctx = getAudioContext()
 
-  const masterGain = audioContext.createGain()
-  masterGain.connect(audioContext.destination)
+  const masterGain = ctx.createGain()
+  masterGain.connect(ctx.destination)
   masterGain.gain.value = 0.4
 
-  // Gong: inharmonic partials (additive synthesis) – creates metallic, resonant character [ratio to the fundamental frequency, amplitude]
-  const baseFreq = 220 // fundamental frequency (A3)
+  // Gong: inharmonic partials (additive synthesis) – creates metallic, resonant character [ratio, amplitude]
+  const baseFreq = 220
   const partials: [number, number][] = [
     [1, 0.8], [1.5, 0.5], [2.37, 0.35], [3.17, 0.2], [4.2, 0.15], [5.5, 0.08],
   ]
 
-  /* decay time in seconds */
   const decay = 3
+  const t = ctx.currentTime
 
   for (const [ratio, amp] of partials) {
-    /* create oscillator */
-    const osc = audioContext.createOscillator()
+    const osc = ctx.createOscillator()
+    const envelope = ctx.createGain()
 
-    /* create envelope gain node */
-    const envelope = audioContext.createGain()
-
-    /* connect oscillator -> envelope -> master gain */
     osc.connect(envelope)
     envelope.connect(masterGain)
 
-    /* set frequency */
     osc.frequency.value = baseFreq * ratio
-
-    /* set type to sine */
     osc.type = 'sine'
 
-    /* shape the amplitude envelope: instant attack, exponential decay */
-    envelope.gain.setValueAtTime(0, 0)
-    envelope.gain.linearRampToValueAtTime(amp * 0.5, 0.005)
-    envelope.gain.exponentialRampToValueAtTime(0.001, decay)
-    /* start oscillator */
-    osc.start(0)
-    /* stop oscillator after decay seconds */
-    osc.stop(decay)
+    envelope.gain.setValueAtTime(0, t)
+    envelope.gain.linearRampToValueAtTime(amp * 0.5, t + 0.005)
+    envelope.gain.exponentialRampToValueAtTime(0.001, t + decay)
+    osc.start(t)
+    osc.stop(t + decay)
   }
 }
 
@@ -55,13 +64,22 @@ function App() {
     const saved = localStorage.getItem(CHIME_MINUTE_KEY)
     return saved !== null ? parseInt(saved, 10) : 0
   })
-  const [active, setActive] = useState(false)
+  const [active, setActive] = useState(() => {
+    return localStorage.getItem(CHIME_ACTIVE_KEY) === 'true'
+  })
   const [now, setNow] = useState(() => new Date())
-  const lastChimeMinute = useRef<number | null>(null)
+  const [prefers24Hour, setPrefers24Hour] = useState<boolean | null>(null)
+  const lastChimeHour = useRef<number | null>(null)
+  const lastSentNextChime = useRef<string | null>(null)
 
   useEffect(() => {
     localStorage.setItem(CHIME_MINUTE_KEY, String(chimeMinute))
+    lastChimeHour.current = null
   }, [chimeMinute])
+
+  useEffect(() => {
+    localStorage.setItem(CHIME_ACTIVE_KEY, String(active))
+  }, [active])
 
   useEffect(() => {
     const id = setInterval(() => {
@@ -71,19 +89,59 @@ function App() {
       if (!active) return
 
       const minute = date.getMinutes()
-      const seconds = date.getSeconds()
+      const hour = date.getHours()
 
-      if (minute === chimeMinute && seconds < 1) {
-        if (lastChimeMinute.current !== chimeMinute) {
-          lastChimeMinute.current = chimeMinute
-          playChime()
-        }
-      } else if (minute !== chimeMinute) {
-        lastChimeMinute.current = null
+      if (minute === chimeMinute && lastChimeHour.current !== hour) {
+        lastChimeHour.current = hour
+        playChime()
       }
     }, 1000)
     return () => clearInterval(id)
   }, [active, chimeMinute])
+
+  useEffect(() => {
+    let cancelled = false
+
+    window.electronAPI
+      .getPrefers24HourTime()
+      .then((value) => {
+        if (!cancelled) {
+          setPrefers24Hour(value)
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setPrefers24Hour(null)
+        }
+      })
+
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  useEffect(() => {
+    if (!active) {
+      if (lastSentNextChime.current !== null) {
+        window.electronAPI.setNextChime(null)
+        lastSentNextChime.current = null
+      }
+      return
+    }
+
+    const minute = now.getMinutes()
+    const sec = now.getSeconds()
+    const passedThisHour = minute > chimeMinute || (minute === chimeMinute && sec > 0)
+    const nextHour = now.getHours() + (passedThisHour ? 1 : 0)
+    const nextDate = new Date(now)
+    nextDate.setHours(nextHour % 24, chimeMinute, 0, 0)
+    const next = formatTime(nextDate, false, prefers24Hour)
+
+    if (lastSentNextChime.current !== next) {
+      window.electronAPI.setNextChime(next)
+      lastSentNextChime.current = next
+    }
+  }, [active, chimeMinute, now, prefers24Hour])
 
   const handleEnable = () => {
     playChime()
@@ -99,9 +157,11 @@ function App() {
     const min = now.getMinutes()
     const sec = now.getSeconds()
     const passedThisHour = min > chimeMinute || (min === chimeMinute && sec > 0)
-    let hour = now.getHours() + (passedThisHour ? 1 : 0)
+    const hour = now.getHours() + (passedThisHour ? 1 : 0)
     for (let i = 0; i < 12; i++) {
-      result.push(`${pad((hour + i) % 24)}:${pad(chimeMinute)}`)
+      const time = new Date(now)
+      time.setHours((hour + i) % 24, chimeMinute, 0, 0)
+      result.push(formatTime(time, false, prefers24Hour))
     }
     return result
   })()
@@ -157,7 +217,7 @@ function App() {
           </div>
 
           <p className="text-center text-xs text-neutral-500">
-            The chime will play when you enable so your browser allows hourly chimes
+            Your preference is saved between sessions
           </p>
         </div>
       </div>
@@ -183,7 +243,7 @@ function App() {
       </div>
 
       <div className="text-6xl sm:text-7xl font-light tabular-nums mb-4">
-        {pad(now.getHours())}:{pad(now.getMinutes())}:{pad(now.getSeconds())}
+        {formatTime(now, true, prefers24Hour)}
       </div>
 
       <p className="text-neutral-500 text-sm mb-10">
@@ -193,9 +253,9 @@ function App() {
       <div className="w-full max-w-sm">
         <p className="text-xs text-neutral-500 uppercase tracking-wider mb-3">Upcoming chimes</p>
         <div className="flex flex-wrap gap-2 justify-center">
-          {nextChimeTimes.map((time) => (
+          {nextChimeTimes.map((time, index) => (
             <span
-              key={time}
+              key={`${time}-${index}`}
               className="px-3 py-1.5 rounded-lg bg-neutral-800/80 text-neutral-300 text-sm font-mono"
             >
               {time}

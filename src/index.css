@@ -3,7 +3,6 @@
 @layer base {
   :root {
     font-family: system-ui, Avenir, Helvetica, Arial, sans-serif;
-    color-scheme: light dark;
     font-synthesis: none;
     text-rendering: optimizeLegibility;
     -webkit-font-smoothing: antialiased;
@@ -13,13 +12,14 @@
   body {
     margin: 0;
     color: rgb(255 255 255 / 0.87);
-    background-color: #242424;
+    background-color: #0a0a0a;
   }
 
-  @media (prefers-color-scheme: light) {
-    body {
-      color: #213547;
-      background-color: #fff;
-    }
+  #root {
+    -webkit-app-region: drag;
+  }
+
+  button, input, select, textarea, a, [role="button"] {
+    -webkit-app-region: no-drag;
   }
 }
